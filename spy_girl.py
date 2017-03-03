@@ -2,11 +2,15 @@
 import urllib2
 import urllib
 import json
-import re
 import os
 import sys
+import mySqlOrm
+import soup_seek
+import requests
 import imghdr
 import string
+from time import ctime
+
 
 class spy:
     def __init__(self, imgFolder):
@@ -17,41 +21,54 @@ class spy:
         self._targetPath = ''
         self._fileIndex = 1
         self.createFolder()
-        self.readImgInfo()
-
-
 
     def scanPage(self):
-        try:
-            params = {'offset': self._offset, 'order': 'created', 'math': 1}
-            response = urllib2.urlopen('http://tu.duowan.com/m/meinv', urllib.urlencode(params))
 
-            result = response.read()
-            obj = json.loads(result)
-            # print obj['html']
+        params = {'offset': self._offset, 'order': 'created', 'math': 1}
+        response = urllib2.urlopen('http://tu.duowan.com/m/meinv', urllib.urlencode(params))
 
-            imgList = re.findall("<img.*?src=\"(.*?\.(jpg|png))\".*?/>", obj['html'])
-            for imgUrl in imgList:
-                print imgUrl[0]
-                response = urllib2.urlopen(imgUrl[0])
-                content = response.read()
-                imgType = imghdr.what('', h=content)
-                headers = response.headers
-                # print headers
-                if imgType:
-                    print self._targetPath
-                    items = string.split(imgUrl[0], '/')
-                    print items
-                    fileName = os.path.join(self._targetPath, str(self._fileIndex) + '.jpg')
-                    with open(fileName, 'wb') as f:
-                        f.write(content)
-                        print 'finish download'
-                        self._fileIndex += 1
-                else:
-                    print 'error file type'
+        result = response.read()
+        obj = json.loads(result)
+        reader = soup_seek.HtmlReader(obj['html'])
+        imgs = reader.readImgs()
+        self.downloadImage(imgs, None)
+        print 'scan for offset ', self._offset
+        print 'current scan end '
 
-        except:
-            print 'error'
+    def downloadImage(self, imgs, folder):
+
+        for img in imgs:
+            url = img['src']
+            items = string.split(url, '/')
+            if folder:
+                folderPath = os.path.join(self._targetPath, folder)
+                if not os.path.exists(folderPath):
+                    os.mkdir(folderPath)
+                fileName = os.path.join(self._targetPath, folder, items[-1])
+            else:
+                fileName = os.path.join(self._targetPath, items[-1])
+            if os.path.exists(fileName):
+                print fileName, 'already exists'
+                continue
+            response = requests.get(url)
+            content = response.content
+            imgType = imghdr.what('', h=content)
+            if imgType:
+                with open(fileName, 'wb') as f:
+                    f.write(content)
+                    print 'finish download'
+                    self._fileIndex += 1
+                    parentUrl = img.parent['href']
+                    parentUrl = parentUrl.replace('gallery', 'scroll')
+                    mySqlOrm.insertImage(items[-1], ctime(),
+                                         response.headers['Date'], parentUrl, url)
+            else:
+                print 'error file type'
+
+    def getAllList(self):
+        for i in range(0, self._endPage):
+            self.scanPage()
+            self._offset += 30
 
     def createFolder(self):
         path = sys.path[0]
@@ -66,9 +83,26 @@ class spy:
             self._fileIndex = len(os.listdir(self._targetPath))
 
     def readImgInfo(self):
-        #read img info from my sql
-        pass
+        # read img info from my sql
+        self._imageInfos = mySqlOrm.queryImage()
+        for item in self._imageInfos:
+            print item.file_name
+
+    def scanDetailPage(self):
+        if self._imageInfos:
+            for item in self._imageInfos:
+                print item.main_site_url
+                response = requests.get(item.main_site_url)
+                content = response.content
+                reader = soup_seek.HtmlReader(content)
+                print reader.getSoup().head.title.string
+                imgs = reader.readImgs()
+                self.downloadImage(imgs, reader.getSoup().head.title.string)
+
 
 if __name__ == '__main__':
     s = spy('beauty')
-    s.scanPage()
+    s.getAllList()
+    s.readImgInfo()
+    s.scanDetailPage()
+    mySqlOrm.closeSession()
